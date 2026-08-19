@@ -5,21 +5,11 @@ Groq, Cerebras y DeepSeek exponen APIs compatibles con el formato de
 OpenAI, así que reutilizamos el mismo cliente `openai` para las tres —
 solo cambia base_url y api_key. Gemini usa su propio SDK.
 """
-import asyncio
-import httpx
 from openai import AsyncOpenAI
 import google.generativeai as genai
 
 from config import settings
 from providers.base import LlmProvider
-
-# FIX latencia: AsyncOpenAI sin `timeout=` explícito usa el default de
-# la librería (varios minutos). Si un proveedor se cuelga (no da
-# error, simplemente no responde), route_chat() se queda esperando
-# ahí mucho más de lo razonable ANTES de intentar el siguiente de la
-# cadena. 12s da margen de sobra para una respuesta normal y falla
-# rápido si el proveedor no contesta.
-_PROVIDER_TIMEOUT = httpx.Timeout(connect=5.0, read=12.0, write=5.0, pool=5.0)
 
 
 class _OpenAICompatibleLlm(LlmProvider):
@@ -30,9 +20,7 @@ class _OpenAICompatibleLlm(LlmProvider):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
-        self._client = AsyncOpenAI(
-            base_url=base_url, api_key=api_key, timeout=_PROVIDER_TIMEOUT
-        )
+        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
 
     async def chat(
         self, messages: list[dict], json_mode: bool = False
@@ -119,20 +107,12 @@ class GeminiFlashLlm(LlmProvider):
     async def chat(
         self, messages: list[dict], json_mode: bool = False
     ) -> tuple[str, int, int]:
-        # FIX: generate_content() es SÍNCRONO/BLOQUEANTE. Llamarlo
-        # directamente dentro de una función async congela el event
-        # loop ENTERO de FastAPI mientras espera a Gemini — TODAS las
-        # peticiones concurrentes quedan congeladas, no solo esta.
-        # run_in_executor lo mueve a un thread aparte para no bloquear.
+        # google-generativeai no tiene cliente async estable en todas las
+        # versiones; para producción real, envuelve esto en un executor
+        # (loop.run_in_executor) para no bloquear el event loop de FastAPI.
         prompt = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
         generation_config = {"response_mime_type": "application/json"} if json_mode else {}
-        loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(
-            None,
-            lambda: self._model.generate_content(
-                prompt, generation_config=generation_config
-            ),
-        )
+        resp = self._model.generate_content(prompt, generation_config=generation_config)
         text = resp.text
         input_tokens = getattr(resp.usage_metadata, "prompt_token_count", len(prompt) // 4)
         output_tokens = getattr(resp.usage_metadata, "candidates_token_count", len(text) // 4)
