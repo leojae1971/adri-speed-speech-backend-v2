@@ -55,15 +55,42 @@ async def chat(req: ChatRequest):
         audio_base64 = None
         visemes = []
         
+        tts_provider_used = None
         if text:
             try:
                 tts_result = await route_tts(text, req.voice_id, req.lang)
                 audio_base64 = base64.b64encode(tts_result["audio"]).decode("ascii")
                 visemes = estimate_visemes(text)
+                tts_provider_used = tts_result.get("provider_used")
             except Exception as e:
                 # Audio no es crítico, no fallamos el chat por esto
                 pass
-        
+
+        # Instrumentación de coste (no bloquea si falla)
+        try:
+            from cost_meter import get_cost_meter, CostEvent
+            tokens = result.get("tokens") or {}
+            tokens_in = tokens.get("input") if isinstance(tokens, dict) else None
+            tokens_out = tokens.get("output") if isinstance(tokens, dict) else None
+            get_cost_meter().log(CostEvent(
+                service='llm',
+                provider=result.get('provider_used', 'unknown'),
+                language=req.lang,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                endpoint='/chat',
+            ))
+            if audio_base64 and tts_provider_used:
+                get_cost_meter().log(CostEvent(
+                    service='tts',
+                    provider=tts_provider_used,
+                    language=req.lang,
+                    characters=len(text),
+                    endpoint='/chat-tts',
+                ))
+        except Exception:
+            pass
+
         # 3. Devolver TODO junto: texto + audio + visemes
         response = {
             "text": text,
@@ -91,6 +118,20 @@ async def chat(req: ChatRequest):
 async def tts(req: TtsRequest):
     try:
         result = await route_tts(req.text, req.voice_id, req.lang)
+
+        # Instrumentación de coste (no bloquea si falla)
+        try:
+            from cost_meter import get_cost_meter, CostEvent
+            get_cost_meter().log(CostEvent(
+                service='tts',
+                provider=result.get('provider_used', 'unknown'),
+                language=req.lang,
+                characters=len(req.text),
+                endpoint='/tts',
+            ))
+        except Exception:
+            pass
+
         return {
             "audio_base64": base64.b64encode(result["audio"]).decode("ascii"),
             "provider_used": result["provider_used"],
@@ -112,3 +153,61 @@ async def transcribe(file: UploadFile = File(...), lang: str = Form("en")):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+
+# ═══════════════════════════════════════════════════════════
+# COST METER — Endpoints admin (solo lectura, sin coste)
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/admin/costs/summary")
+async def admin_cost_summary(days: int = 30):
+    """Resumen del coste de los últimos N días."""
+    try:
+        from cost_meter import get_cost_meter
+        return get_cost_meter().get_summary(days=days)
+    except Exception as e:
+        return {"error": str(e), "hint": "Cost Meter no inicializado"}
+
+
+@app.get("/admin/costs/by-language")
+async def admin_cost_by_language(days: int = 30):
+    """Coste desglosado por idioma."""
+    try:
+        from cost_meter import get_cost_meter
+        return {"days": days, "breakdown": get_cost_meter().get_cost_by_language(days=days)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/admin/costs/by-provider")
+async def admin_cost_by_provider(days: int = 30):
+    """Coste desglosado por proveedor."""
+    try:
+        from cost_meter import get_cost_meter
+        return {"days": days, "breakdown": get_cost_meter().get_cost_by_provider(days=days)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/admin/pricing")
+async def admin_pricing():
+    """Lista de precios verificados de todos los proveedores."""
+    try:
+        from pricing import list_providers
+        result = {}
+        for service in ('tts', 'translation', 'stt', 'llm'):
+            result[service] = [
+                {
+                    'provider': p.provider,
+                    'usd_per_million': p.usd_per_million,
+                    'usd_per_million_out': p.usd_per_million_out,
+                    'usd_per_unit': p.usd_per_unit,
+                    'license_commercial_ok': p.license_commercial_ok,
+                    'notes': p.notes,
+                }
+                for p in list_providers(service)
+            ]
+        return result
+    except Exception as e:
+        return {"error": str(e)}

@@ -1,0 +1,4 @@
+cost_events.db
+cost_events.db-journal
+main.py.bak_*
+main.py.broken_*
