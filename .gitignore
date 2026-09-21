@@ -1,4 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+ENV/
+.pytest_cache/
+
+# Cost Meter (base de datos local)
 cost_events.db
 cost_events.db-journal
+
+# Backups y archivos rotos
 main.py.bak_*
 main.py.broken_*
+
+# OS
+.DS_Store
+
+# Entorno
+.env
+.env.local
+token queda guardado*
