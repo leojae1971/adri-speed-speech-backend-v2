@@ -16,8 +16,7 @@ if _google_creds_json:
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
-
-from router import route_chat, route_tts, route_stt, AllProvidersExhausted
+from router import route_chat, route_tts, route_stt, AllProvidersExhausted, route_translation
 from viseme import estimate_visemes
 from startup_checks import validate_llm_catalogs
 
@@ -211,3 +210,49 @@ async def admin_pricing():
         return result
     except Exception as e:
         return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════
+# TRANSLATION — Caché + cadena de proveedores
+# ═══════════════════════════════════════════════════════════
+
+class TranslationRequest(BaseModel):
+    text: str
+    source: str
+    target: str
+
+
+@app.post("/translate")
+async def translate(req: TranslationRequest):
+    """Traduce texto usando caché + cadena Langbly → Google → Azure."""
+    try:
+        result = await route_translation(req.text, req.source, req.target)
+
+        # Instrumentación de coste (no bloquea)
+        try:
+            from cost_meter import get_cost_meter, CostEvent
+            get_cost_meter().log(CostEvent(
+                service='translation',
+                provider=result['provider_used'],
+                language=req.target,
+                characters=len(req.text),
+                cache_hit=result['cache_hit'],
+                endpoint='/translate',
+            ))
+        except Exception:
+            pass
+
+        return result
+    except AllProvidersExhausted as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/admin/cache/stats")
+async def admin_cache_stats():
+    """Estadísticas de la caché de traducción."""
+    try:
+        from translation_cache import get_translation_cache
+        return get_translation_cache().stats()
+    except Exception as e:
+        return {"error": str(e)}
+

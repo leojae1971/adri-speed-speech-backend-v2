@@ -24,3 +24,5 @@ main.py.broken_*
 .env
 .env.local
 token queda guardado*
+translation_cache.db
+translation_cache.db-journal

@@ -12,6 +12,12 @@ from cache import get_cached_audio, store_cached_audio
 from providers.llm_providers import GroqLlm, CerebrasLlm, GeminiFlashLlm, DeepSeekLlm
 from providers.tts_providers import AzureTts, GoogleWavenetTts, EdgeTts
 from providers.stt_providers import GroqWhisperStt
+from providers.translation_providers import (
+    LangblyTranslation,
+    GoogleCloudTranslation,
+    AzureTranslation,
+)
+from translation_cache import get_translation_cache
 
 
 LLM_CHAIN = [
@@ -36,6 +42,14 @@ def _tts_is_configured(provider_key: str) -> bool:
 
 STT_CHAIN = [
     ("groq_whisper", GroqWhisperStt()),
+]
+
+# Cadena de traducción: Langbly → Google → Azure.
+# Sin Azure como primario (Langbly es 4x más barato).
+TRANSLATION_CHAIN = [
+    ("langbly", LangblyTranslation()),
+    ("google_translate", GoogleCloudTranslation()),
+    ("azure_translator", AzureTranslation()),
 ]
 
 
@@ -129,3 +143,72 @@ async def route_stt(audio_bytes: bytes, lang: str) -> dict:
             continue
 
     raise AllProvidersExhausted(f"Todos los STT fallaron o están agotados. Último error: {last_error}")
+
+
+# ═══════════════════════════════════════════════════════════
+# TRANSLATION ROUTER — caché primero, luego cadena de proveedores
+# ═══════════════════════════════════════════════════════════
+
+async def route_translation(text: str, source_lang: str, target_lang: str) -> dict:
+    """
+    Traduce texto con caché + cadena de proveedores.
+
+    Flujo:
+    1. Cache lookup (por proveedor específico)
+    2. Si miss, buscar en cualquier proveedor (ahorra APIs)
+    3. Si aún miss, recorrer TRANSLATION_CHAIN
+    4. Guardar en caché el resultado
+
+    Devuelve: {"translation": str, "provider_used": str, "cache_hit": bool}
+    """
+    if not text.strip():
+        return {"translation": "", "provider_used": "noop", "cache_hit": False}
+
+    cache = get_translation_cache()
+
+    # Nivel 1: cache por proveedor primario (langbly)
+    primary_provider = TRANSLATION_CHAIN[0][0]
+    cached = cache.get(text, source_lang, target_lang, primary_provider)
+    if cached is not None:
+        return {"translation": cached, "provider_used": primary_provider, "cache_hit": True}
+
+    # Nivel 2: cache en cualquier proveedor (evita llamar API)
+    any_hit = cache.get_any_provider(text, source_lang, target_lang)
+    if any_hit is not None:
+        translation, provider = any_hit
+        return {"translation": translation, "provider_used": provider, "cache_hit": True}
+
+    # Nivel 3: recorrer cadena
+    last_error = None
+    for key, provider in TRANSLATION_CHAIN:
+        limits = TRANSLATION_PROVIDERS_CONFIG[key]
+
+        # Saltar si no está configurado
+        is_configured = getattr(provider, "is_configured", True)
+        if not is_configured:
+            continue
+
+        if circuit_breaker.is_open(key):
+            continue
+        if not quota_manager.has_quota(key, limits, needed_requests=1):
+            continue
+
+        try:
+            translation = await provider.translate(text, source_lang, target_lang)
+            quota_manager.record(key, limits.reset, requests=1, tokens=len(text))
+            circuit_breaker.record_success(key)
+
+            # Guardar en caché
+            cache.store(text, source_lang, target_lang, translation, key)
+
+            return {"translation": translation, "provider_used": key, "cache_hit": False}
+        except Exception as e:
+            last_error = e
+            status_code = getattr(e, "status_code", None)
+            failure_type = classify_error(status_code, str(e))
+            circuit_breaker.record_failure(key, failure_type)
+            continue
+
+    raise AllProvidersExhausted(
+        f"Todos los proveedores de traducción fallaron. Último error: {last_error}"
+    )

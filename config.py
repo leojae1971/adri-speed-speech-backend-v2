@@ -93,6 +93,24 @@ STT_PROVIDERS_CONFIG = {
 }
 
 
+TRANSLATION_PROVIDERS_CONFIG = {
+    "langbly": ProviderLimits(
+        name="langbly", chars_per_month=500_000, reset="monthly",
+        notes="Primario por precio ($5/1M vs Google $20/M y Azure $10/M). "
+              "Free tier 500K chars/mes. Verificar endpoint exacto en "
+              "docs.langbly.com antes de producción.",
+    ),
+    "google_translate": ProviderLimits(
+        name="google_translate", chars_per_month=500_000, reset="monthly",
+        notes="Fallback. $20/1M después de 500K gratis. Requiere billing.",
+    ),
+    "azure_translator": ProviderLimits(
+        name="azure_translator", chars_per_month=2_000_000, reset="monthly",
+        notes="Último recurso. 2M chars/mes en tier F0. $10/1M después.",
+    ),
+}
+
+
 @dataclass
 class Settings:
     groq_api_key: str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
@@ -106,6 +124,13 @@ class Settings:
     )
     db_path: str = field(default_factory=lambda: os.getenv("DB_PATH", "adri_speech.db"))
     audio_cache_dir: str = field(default_factory=lambda: os.getenv("AUDIO_CACHE_DIR", "./audio_cache"))
+    translation_cache_db: str = field(
+        default_factory=lambda: os.getenv("TRANSLATION_CACHE_DB", "translation_cache.db")
+    )
+    langbly_api_key: str = field(default_factory=lambda: os.getenv("LANGBLY_API_KEY", ""))
+    langbly_base_url: str = field(
+        default_factory=lambda: os.getenv("LANGBLY_BASE_URL", "https://api.langbly.com")
+    )
 
 
 settings = Settings()
