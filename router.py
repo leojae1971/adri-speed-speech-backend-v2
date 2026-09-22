@@ -17,6 +17,10 @@ from providers.translation_providers import (
     GoogleCloudTranslation,
     AzureTranslation,
 )
+from providers.chinese_translation import (
+    TencentTranslation,
+    NiutransTranslation,
+)
 from translation_cache import get_translation_cache
 from providers.translation_providers import (
     LangblyTranslation,
@@ -52,11 +56,23 @@ STT_CHAIN = [
 
 # Cadena de traducción: Langbly → Google → Azure.
 # Sin Azure como primario (Langbly es 4x más barato).
-TRANSLATION_CHAIN = [
-    ("langbly", LangblyTranslation()),
+# Cadena para usuarios en Occidente (free)
+TRANSLATION_CHAIN_WEST = [
+    ("langbly", LangblyTranslation()),          # primario si tiene API key
     ("google_translate", GoogleCloudTranslation()),
     ("azure_translator", AzureTranslation()),
 ]
+
+# Cadena para usuarios en China (free)
+# Tencent y Niutrans tienen servidores en China → latencia óptima.
+TRANSLATION_CHAIN_CN = [
+    ("tencent", TencentTranslation()),
+    ("niutrans", NiutransTranslation()),
+    ("langbly", LangblyTranslation()),          # fallback
+]
+
+# Cadena legacy (compatibilidad)
+TRANSLATION_CHAIN = TRANSLATION_CHAIN_WEST
 
 # Cadena de traducción: Langbly → Google → Azure.
 # Sin Azure como primario (Langbly es 4x más barato).
@@ -163,7 +179,12 @@ async def route_stt(audio_bytes: bytes, lang: str) -> dict:
 # TRANSLATION ROUTER — caché primero, luego cadena de proveedores
 # ═══════════════════════════════════════════════════════════
 
-async def route_translation(text: str, source_lang: str, target_lang: str) -> dict:
+async def route_translation(
+    text: str,
+    source_lang: str,
+    target_lang: str,
+    user_region: str = "west",
+) -> dict:
     """
     Traduce texto con caché + cadena de proveedores.
 
@@ -192,10 +213,23 @@ async def route_translation(text: str, source_lang: str, target_lang: str) -> di
         translation, provider = any_hit
         return {"translation": translation, "provider_used": provider, "cache_hit": True}
 
-    # Nivel 3: recorrer cadena
+    # Nivel 3: recorrer cadena según región
+    # Detectar región desde headers si están disponibles
+    try:
+        from fastapi import Request  # noqa
+        # Nota: request no está disponible aquí; la región se pasa desde main.py
+    except ImportError:
+        pass
+
+    chain = TRANSLATION_CHAIN_WEST  # default
+    if user_region == "cn":
+        chain = TRANSLATION_CHAIN_CN
+
     last_error = None
-    for key, provider in TRANSLATION_CHAIN:
-        limits = TRANSLATION_PROVIDERS_CONFIG[key]
+    for key, provider in chain:
+        limits = TRANSLATION_PROVIDERS_CONFIG.get(key)
+        if limits is None:
+            continue
 
         # Saltar si no está configurado
         is_configured = getattr(provider, "is_configured", True)
@@ -295,3 +329,32 @@ async def route_translation(text: str, source_lang: str, target_lang: str) -> di
     raise AllProvidersExhausted(
         f"Todos los proveedores de traducción fallaron. Último error: {last_error}"
     )
+
+
+# ═══════════════════════════════════════════════════════════
+# REGION DETECTION
+# ═══════════════════════════════════════════════════════════
+
+def detect_user_region(request_headers: dict | None = None,
+                       accept_language: str | None = None) -> str:
+    """
+    Detecta la región del usuario para enrutar al proveedor con menor latencia.
+
+    Prioridad:
+    1. Header X-User-Region (el frontend lo envía si el usuario lo eligió)
+    2. Accept-Language que empiece por "zh" → China
+    3. Default: "west" (Occidente)
+
+    Devuelve: "cn" o "west"
+    """
+    if request_headers:
+        explicit = request_headers.get("x-user-region", "").lower()
+        if explicit in ("cn", "china"):
+            return "cn"
+        if explicit in ("west", "eu", "us"):
+            return "west"
+
+    if accept_language and accept_language.lower().startswith("zh"):
+        return "cn"
+
+    return "west"

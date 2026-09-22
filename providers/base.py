@@ -39,3 +39,12 @@ class TranslationProvider(ABC):
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         """Devuelve el texto traducido. Lanza excepción si falla."""
         ...
+
+
+class TranslationProvider(ABC):
+    name: str
+
+    @abstractmethod
+    async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
+        """Devuelve el texto traducido. Lanza excepción si falla."""
+        ...

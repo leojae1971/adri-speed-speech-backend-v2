@@ -14,7 +14,7 @@ if _google_creds_json:
         f.write(_google_creds_json)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _creds_path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from pydantic import BaseModel
 from router import route_chat, route_tts, route_stt, AllProvidersExhausted, route_translation
 from viseme import estimate_visemes
@@ -208,6 +208,62 @@ async def admin_pricing():
                 for p in list_providers(service)
             ]
         return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════
+# TRANSLATION — Caché + cadena de proveedores
+# ═══════════════════════════════════════════════════════════
+
+class TranslationRequest(BaseModel):
+    text: str
+    source: str
+    target: str
+
+
+@app.post("/translate")
+async def translate(req: TranslationRequest, request: Request = None):
+    """Traduce texto usando caché + cadena regional de proveedores."""
+    try:
+        # Detectar región del usuario
+        region = "west"
+        if request is not None:
+            from router import detect_user_region
+            region = detect_user_region(
+                request_headers=dict(request.headers),
+                accept_language=request.headers.get("accept-language"),
+            )
+
+        result = await route_translation(
+            req.text, req.source, req.target, user_region=region
+        )
+
+        # Instrumentación de coste (no bloquea)
+        try:
+            from cost_meter import get_cost_meter, CostEvent
+            get_cost_meter().log(CostEvent(
+                service='translation',
+                provider=result['provider_used'],
+                language=req.target,
+                characters=len(req.text),
+                cache_hit=result['cache_hit'],
+                endpoint='/translate',
+            ))
+        except Exception:
+            pass
+
+        return result
+    except AllProvidersExhausted as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/admin/cache/stats")
+async def admin_cache_stats():
+    """Estadísticas de la caché de traducción."""
+    try:
+        from translation_cache import get_translation_cache
+        return get_translation_cache().stats()
     except Exception as e:
         return {"error": str(e)}
 
