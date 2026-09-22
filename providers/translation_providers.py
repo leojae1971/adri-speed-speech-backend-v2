@@ -20,6 +20,12 @@ from utils_logger import Logger
 
 
 class LangblyTranslation(TranslationProvider):
+    """
+    Langbly: API compatible con Google Translate v2.
+    Endpoint: POST {base_url}/language/translate/v2
+    Auth: header X-API-Key
+    Docs: https://langbly.com/docs
+    """
     name = "langbly"
 
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
@@ -34,15 +40,15 @@ class LangblyTranslation(TranslationProvider):
         if not self.is_configured:
             raise RuntimeError("Langbly: LANGBLY_API_KEY no configurada")
 
-        # TODO: verificar endpoint y payload exactos en docs.langbly.com
-        url = f"{self.base_url}/v1/translate"
+        url = f"{self.base_url}/language/translate/v2"
         payload = {
-            "text": text,
-            "source_lang": source_lang,
-            "target_lang": target_lang,
+            "q": text,
+            "target": target_lang,
+            "source": source_lang,
+            "format": "text",
         }
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "X-API-Key": self.api_key,
             "Content-Type": "application/json",
         }
 
@@ -52,18 +58,12 @@ class LangblyTranslation(TranslationProvider):
                 raise RuntimeError(f"Langbly HTTP {resp.status_code}: {resp.text[:200]}")
             data = resp.json()
 
-        # Ajustar según respuesta real. Formato típico:
-        # {"translation": "...", "detected_source_lang": "es"}
-        translation = (
-            data.get("translation")
-            or data.get("translated_text")
-            or data.get("result")
-        )
-        if not translation:
-            raise RuntimeError(f"Langbly: respuesta sin campo de traducción: {data}")
+        try:
+            translation = data["data"]["translations"][0]["translatedText"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError(f"Langbly: respuesta inesperada: {data}") from e
+
         return translation
-
-
 class GoogleCloudTranslation(TranslationProvider):
     name = "google_translate"
 
