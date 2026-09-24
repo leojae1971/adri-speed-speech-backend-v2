@@ -72,7 +72,7 @@ class GroqLlm(_OpenAICompatibleLlm):
             name="groq",
             base_url="https://api.groq.com/openai/v1",
             api_key=settings.groq_api_key,
-            model="llama-3.1-8b-instant",
+            model="qwen/qwen3.8-27b",
         )
 
 
